@@ -41,6 +41,16 @@ env.close()
 3. Check model architecture matches expected
 
 **Expected**: Model loads without errors, correct input/output dimensions
+#### Test 2.3: Random Movement Test
+**Objective**: Validate environment response to random actions
+
+**Results**: Environment should update state without errors
+
+**Test ScreenShot:**
+
+![alt text](../screenshot.png)
+**Input**: Random action vector within valid range
+Input Values: 
 
 #### Test 2.2: Prediction Pipeline
 **Objective**: Test end-to-end prediction from EMG to action

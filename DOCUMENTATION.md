@@ -8,6 +8,6 @@ This simulation environment bridges EMG signal classification with biomechanical
 
 ### Data Flow
 
-```
+```mermaid
 EMG Data → Trained NN Model → Movement Predictions → myosuite Environment → Visual Feedback
 ```
