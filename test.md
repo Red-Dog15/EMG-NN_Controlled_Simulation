@@ -48,7 +48,8 @@ env.close()
 
 **Test ScreenShot:**
 
-![alt text](../screenshot.png)
+<img width="1280" height="800" alt="image" src="https://github.com/user-attachments/assets/c86b0ae0-34b8-4e22-b102-4b1471fc0b16" />
+
 **Input**: Random action vector within valid range
 Input Values: 
 
