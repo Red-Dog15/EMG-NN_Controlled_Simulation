@@ -26,15 +26,42 @@ print("Initializing myosuite environment...")
 env = gym.make(ENV_ID)
 env.reset()
 
+def _get_actuator_names(env):
+    try:
+        unwrapped = env.unwrapped
+        model = getattr(unwrapped, "model", None)
+
+        if model is None:
+            sim = getattr(unwrapped, "sim", None)
+            model = getattr(sim, "model", None) if sim is not None else None
+
+        if model is None:
+            return []
+
+        if hasattr(model, "actuator_names"):
+            return list(getattr(model, "actuator_names", []))
+
+        try:
+            import mujoco
+
+            if hasattr(model, "id2name") and hasattr(model, "nu"):
+                names = []
+                for i in range(model.nu):
+                    name = model.id2name(mujoco.mjtObj.mjOBJ_ACTUATOR, i)
+                    names.append(name or "")
+                return names
+        except Exception:
+            return []
+    except Exception:
+        return []
+
+    return []
+
+
 if PRINT_ACTUATORS:
     print(f"Environment: {ENV_ID}")
     print(f"Action space: {env.action_space}")
-    try:
-        sim = getattr(env.unwrapped, "sim", None)
-        model = getattr(sim, "model", None) if sim is not None else None
-        actuator_names = list(getattr(model, "actuator_names", [])) if model is not None else []
-    except Exception:
-        actuator_names = []
+    actuator_names = _get_actuator_names(env)
 
     if actuator_names:
         print(f"Actuators ({len(actuator_names)}):")
