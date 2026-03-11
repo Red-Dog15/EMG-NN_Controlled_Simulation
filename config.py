@@ -66,6 +66,19 @@ MOVEMENT_ENV_VARS: Dict[str, str] = {
 }
 
 
+# Optional per-movement variant kwargs merged into a base env spec when registered
+# via myosuite.envs.env_variants.register_env_variant.
+# Keep these minimal until each class is validated against actuator behavior.
+MOVEMENT_VARIANT_KWARGS: Dict[str, Dict[str, object]] = {
+	"Wrist_Flexion": {},
+	"Wrist_Extension": {},
+	"Wrist_Pronation": {},
+	"Wrist_Supination": {},
+	"Chuck_Grip": {},
+	"Hand_Open": {},
+}
+
+
 def get_movement_env_routing() -> Dict[str, str]:
 	"""Build movement routing using env var overrides with stable fallbacks."""
 	routing: Dict[str, str] = {}
