@@ -2,6 +2,8 @@ import json
 import os
 import shutil
 
+from config import DUMP_ACTUATORS_ON_START, MAIN_RANDOM_ENV_ID
+
 os.environ["GIT_PYTHON_REFRESH"] = "quiet"  # Suppress git executable warning
 
 git_exe = shutil.which("git")
@@ -19,8 +21,8 @@ if git_exe:
 
 from myosuite.utils import gym
 
-ENV_ID = os.getenv("MYOSUITE_ENV", "myoArmReachFixed-v0")
-PRINT_ACTUATORS = os.getenv("MYOSUITE_DUMP_ACTUATORS", "0") == "1"
+ENV_ID = MAIN_RANDOM_ENV_ID
+PRINT_ACTUATORS = DUMP_ACTUATORS_ON_START
 
 print("Initializing myosuite environment...")
 env = gym.make(ENV_ID)

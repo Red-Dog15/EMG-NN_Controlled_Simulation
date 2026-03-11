@@ -13,6 +13,7 @@ if SCRIPTS_DATA_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DATA_DIR)
 
 from myosuite.utils import gym
+from config import MOVEMENT_CLASSES
 from Data_Mapping import get_MyoSuite_Movement_LUT
 
 
@@ -74,15 +75,7 @@ def test_environment(env_id):
     # Enable debug mode
     os.environ["DEBUG_MAPPING"] = "1"
     
-    movements = [
-        "No_Movement",
-        "Wrist_Flexion",
-        "Wrist_Extension",
-        "Wrist_Pronation",
-        "Wrist_Supination",
-        "Chuck_Grip",
-        "Hand_Open"
-    ]
+    movements = list(MOVEMENT_CLASSES)
     
     print(f"\n{'='*70}")
     print("Testing Movement Mappings:")

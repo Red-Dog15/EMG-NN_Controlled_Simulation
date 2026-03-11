@@ -11,6 +11,14 @@ import numpy as np
 
 from myosuite.utils import gym
 
+from config import (
+    DEBUG_MAPPING_DEFAULT,
+    DEFAULT_ENV_ID,
+    DEFAULT_MANUAL_RUNTIME_SECONDS,
+    MOVEMENT_MENU_MAP,
+    get_movement_env_routing,
+)
+
 SCRIPTS_DATA_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "Scripts", "DATA")
 )
@@ -18,17 +26,6 @@ if SCRIPTS_DATA_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DATA_DIR)
 
 from Data_Mapping import get_MyoSuite_Movement_LUT
-
-
-MOVEMENT_ENV_ROUTING = {
-    # Update these IDs as you register custom task environments.
-    "Wrist_Flexion": os.getenv("MYOSUITE_ENV_WRIST_FLEXION", "myoHandReachFixed-v0"),
-    "Wrist_Extension": os.getenv("MYOSUITE_ENV_WRIST_EXTENSION", "myoHandReachFixed-v0"),
-    "Wrist_Pronation": os.getenv("MYOSUITE_ENV_WRIST_PRONATION", "myoHandKeyTurnFixed-v0"),
-    "Wrist_Supination": os.getenv("MYOSUITE_ENV_WRIST_SUPINATION", "myoArmReachFixed-v0"),
-    "Chuck_Grip": os.getenv("MYOSUITE_ENV_CHUCK_GRIP", "myoHandReachFixed-v0"),
-    "Hand_Open": os.getenv("MYOSUITE_ENV_HAND_OPEN", "myoHandReachFixed-v0"),
-}
 
 
 def show_main_menu():
@@ -46,43 +43,29 @@ def nn_implementation_placeholder():
 
 def print_movement_guide():
     print("\n=== Movement Classes Guide ===")
-    print("1) No_Movement")
-    print("2) Wrist_Flexion")
-    print("3) Wrist_Extension")
-    print("4) Wrist_Pronation")
-    print("5) Wrist_Supination")
-    print("6) Chuck_Grip")
-    print("7) Hand_Open")
-    print("8) Exit")
+    for key, movement in MOVEMENT_MENU_MAP.items():
+        if movement is None:
+            print(f"{key}) Exit")
+        else:
+            print(f"{key}) {movement}")
 
 
 def get_movement_from_user():
     """
     Prompts for movement selection 1-8 and returns movement name or None for exit.
     """
-    movement_map = {
-        "1": "No_Movement",
-        "2": "Wrist_Flexion",
-        "3": "Wrist_Extension",
-        "4": "Wrist_Pronation",
-        "5": "Wrist_Supination",
-        "6": "Chuck_Grip",
-        "7": "Hand_Open",
-        "8": None,
-    }
-
     while True:
         print_movement_guide()
         choice = input("Select movement (1-8): ").strip()
-        if choice in movement_map:
-            return movement_map[choice]
+        if choice in MOVEMENT_MENU_MAP:
+            return MOVEMENT_MENU_MAP[choice]
         print("Invalid selection. Please choose 1-8.")
 
 
-def _resolve_env_for_movement(movement_name, default_env_id):
+def _resolve_env_for_movement(movement_name, default_env_id, movement_env_routing):
     if movement_name == "No_Movement":
         return default_env_id
-    return MOVEMENT_ENV_ROUTING.get(movement_name, default_env_id)
+    return movement_env_routing.get(movement_name, default_env_id)
 
 
 def _open_env(env_id):
@@ -148,15 +131,16 @@ def run_manual_controller(time_value):
     _configure_git_executable()
 
     # Enable debug mode to inspect matching while you build custom task envs.
-    os.environ["DEBUG_MAPPING"] = "1"
+    os.environ["DEBUG_MAPPING"] = DEBUG_MAPPING_DEFAULT
 
-    default_env_id = os.getenv("MYOSUITE_ENV", "myoHandReachFixed-v0")
+    default_env_id = DEFAULT_ENV_ID
+    movement_env_routing = get_movement_env_routing()
     env = None
     actuator_names = []
     current_env_id = None
 
     print("\n=== Movement -> Environment Routing ===")
-    for movement, env_id in MOVEMENT_ENV_ROUTING.items():
+    for movement, env_id in movement_env_routing.items():
         print(f"  {movement}: {env_id}")
     print(f"Default env (No_Movement): {default_env_id}")
     print("=" * 50)
@@ -169,7 +153,11 @@ def run_manual_controller(time_value):
                 print("Exiting controller.")
                 return
 
-            target_env_id = _resolve_env_for_movement(movement, default_env_id)
+            target_env_id = _resolve_env_for_movement(
+                movement,
+                default_env_id,
+                movement_env_routing,
+            )
 
             if env is None or target_env_id != current_env_id:
                 if env is not None:
@@ -191,7 +179,7 @@ def run_manual_controller(time_value):
 
             if movement != "No_Movement" and not np.any(action):
                 print(f"Movement '{movement}' produced no active actuators in '{current_env_id}'.")
-                print("Change MOVEMENT_ENV_ROUTING or update your custom task environment mapping.")
+                print("Change routing in simulation/config.py or update your custom task env mapping.")
                 continue
 
             action = np.array(action, dtype=float)
@@ -218,7 +206,7 @@ def run_manual_controller(time_value):
 
 
 def controller_menu():
-    run_manual_controller(5) # run for 5 seconds
+    run_manual_controller(DEFAULT_MANUAL_RUNTIME_SECONDS)
 
 def main():
     while True: # choice handler (loop)
