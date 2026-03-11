@@ -17,7 +17,18 @@ SCRIPTS_DATA_DIR = os.path.abspath(
 if SCRIPTS_DATA_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DATA_DIR)
 
-from Data_Mapping import get_MyoSuite_Movement_LUT, get_supported_movement_classes
+from Data_Mapping import get_MyoSuite_Movement_LUT
+
+
+MOVEMENT_ENV_ROUTING = {
+    # Update these IDs as you register custom task environments.
+    "Wrist_Flexion": os.getenv("MYOSUITE_ENV_WRIST_FLEXION", "myoHandReachFixed-v0"),
+    "Wrist_Extension": os.getenv("MYOSUITE_ENV_WRIST_EXTENSION", "myoHandReachFixed-v0"),
+    "Wrist_Pronation": os.getenv("MYOSUITE_ENV_WRIST_PRONATION", "myoHandKeyTurnFixed-v0"),
+    "Wrist_Supination": os.getenv("MYOSUITE_ENV_WRIST_SUPINATION", "myoArmReachFixed-v0"),
+    "Chuck_Grip": os.getenv("MYOSUITE_ENV_CHUCK_GRIP", "myoHandReachFixed-v0"),
+    "Hand_Open": os.getenv("MYOSUITE_ENV_HAND_OPEN", "myoHandReachFixed-v0"),
+}
 
 
 def show_main_menu():
@@ -33,27 +44,19 @@ def nn_implementation_placeholder():
     pass
 
 
-def print_movement_guide(supported_movements=None):
-    if supported_movements is None:
-        supported_movements = set()
-
-    def _label(name):
-        if not supported_movements or name in supported_movements or name == "No_Movement":
-            return name
-        return f"{name} [unsupported in current env]"
-
+def print_movement_guide():
     print("\n=== Movement Classes Guide ===")
-    print(f"1) {_label('No_Movement')}")
-    print(f"2) {_label('Wrist_Flexion')}")
-    print(f"3) {_label('Wrist_Extension')}")
-    print(f"4) {_label('Wrist_Pronation')}")
-    print(f"5) {_label('Wrist_Supination')}")
-    print(f"6) {_label('Chuck_Grip')}")
-    print(f"7) {_label('Hand_Open')}")
+    print("1) No_Movement")
+    print("2) Wrist_Flexion")
+    print("3) Wrist_Extension")
+    print("4) Wrist_Pronation")
+    print("5) Wrist_Supination")
+    print("6) Chuck_Grip")
+    print("7) Hand_Open")
     print("8) Exit")
 
 
-def get_movement_from_user(supported_movements=None):
+def get_movement_from_user():
     """
     Prompts for movement selection 1-8 and returns movement name or None for exit.
     """
@@ -69,11 +72,24 @@ def get_movement_from_user(supported_movements=None):
     }
 
     while True:
-        print_movement_guide(supported_movements)
+        print_movement_guide()
         choice = input("Select movement (1-8): ").strip()
         if choice in movement_map:
             return movement_map[choice]
         print("Invalid selection. Please choose 1-8.")
+
+
+def _resolve_env_for_movement(movement_name, default_env_id):
+    if movement_name == "No_Movement":
+        return default_env_id
+    return MOVEMENT_ENV_ROUTING.get(movement_name, default_env_id)
+
+
+def _open_env(env_id):
+    env = gym.make(env_id)
+    env.reset()
+    actuator_names = _get_actuator_names(env)
+    return env, actuator_names
 
 
 def _configure_git_executable():
@@ -130,43 +146,42 @@ def _get_actuator_names(env):
 
 def run_manual_controller(time_value):
     _configure_git_executable()
-    
-    # Enable debug mode to see actuator matching
+
+    # Enable debug mode to inspect matching while you build custom task envs.
     os.environ["DEBUG_MAPPING"] = "1"
 
-    env_id = os.getenv("MYOSUITE_ENV", "myoHandReachFixed-v0")
-    print(f"\nStarting MyoSuite env: {env_id}")
+    default_env_id = os.getenv("MYOSUITE_ENV", "myoHandReachFixed-v0")
+    env = None
+    actuator_names = []
+    current_env_id = None
 
-    env = gym.make(env_id)
-    env.reset()
-
-    actuator_names = _get_actuator_names(env)
-    profile_name, supported_movements = get_supported_movement_classes(actuator_names)
-
-    if not actuator_names:
-        print("Warning: actuator names not found. Movement LUT may be empty.")
-    else:
-        print(f"\n=== ACTUATOR DEBUG INFO ===")
-        print(f"Detected profile: {profile_name}")
-        print(f"Total actuators: {len(actuator_names)}")
-        print("Available actuators:")
-        for i, name in enumerate(actuator_names):
-            print(f"  {i:3d}: {name}")
-        print(f"Supported movements: {sorted(supported_movements)}")
-        print("=" * 50 + "\n")
+    print("\n=== Movement -> Environment Routing ===")
+    for movement, env_id in MOVEMENT_ENV_ROUTING.items():
+        print(f"  {movement}: {env_id}")
+    print(f"Default env (No_Movement): {default_env_id}")
+    print("=" * 50)
 
     step_count = 0
     try:
         while True:
-            movement = get_movement_from_user(supported_movements)
+            movement = get_movement_from_user()
             if movement is None:
                 print("Exiting controller.")
                 return
 
-            if movement not in supported_movements and movement != "No_Movement":
-                print(f"Movement '{movement}' is not supported by env '{env_id}' (profile: {profile_name}).")
-                print("Choose a different movement or switch to a different MyoSuite environment.")
-                continue
+            target_env_id = _resolve_env_for_movement(movement, default_env_id)
+
+            if env is None or target_env_id != current_env_id:
+                if env is not None:
+                    env.close()
+                print(f"\nSwitching environment -> {target_env_id}")
+                env, actuator_names = _open_env(target_env_id)
+                current_env_id = target_env_id
+
+                if not actuator_names:
+                    print("Warning: actuator names not found. Movement LUT may be empty.")
+                else:
+                    print(f"Total actuators in {current_env_id}: {len(actuator_names)}")
 
             action = get_MyoSuite_Movement_LUT(
                 movement_name=movement,
@@ -175,14 +190,14 @@ def run_manual_controller(time_value):
             )
 
             if movement != "No_Movement" and not np.any(action):
-                print(f"Movement '{movement}' produced no active actuators in env '{env_id}'.")
-                print("This environment does not expose a matching control for that movement.")
+                print(f"Movement '{movement}' produced no active actuators in '{current_env_id}'.")
+                print("Change MOVEMENT_ENV_ROUTING or update your custom task environment mapping.")
                 continue
 
             action = np.array(action, dtype=float)
             action = np.clip(action, env.action_space.low, env.action_space.high)
 
-            print(f"Selected movement: {movement}")
+            print(f"Selected movement: {movement} (env: {current_env_id})")
             print(f"Running for {time_value} seconds... Close the window or press Ctrl+C to stop.")
 
             end_time = time.time() + time_value
@@ -197,7 +212,8 @@ def run_manual_controller(time_value):
     except KeyboardInterrupt:
         print(f"\nStopped after {step_count} steps")
     finally:
-        env.close()
+        if env is not None:
+            env.close()
         print("Environment closed")
 
 
