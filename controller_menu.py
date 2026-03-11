@@ -17,7 +17,7 @@ SCRIPTS_DATA_DIR = os.path.abspath(
 if SCRIPTS_DATA_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DATA_DIR)
 
-from Data_Mapping import get_MyoSuite_Movement_LUT
+from Data_Mapping import get_MyoSuite_Movement_LUT, get_supported_movement_classes
 
 
 def show_main_menu():
@@ -33,19 +33,27 @@ def nn_implementation_placeholder():
     pass
 
 
-def print_movement_guide():
+def print_movement_guide(supported_movements=None):
+    if supported_movements is None:
+        supported_movements = set()
+
+    def _label(name):
+        if not supported_movements or name in supported_movements or name == "No_Movement":
+            return name
+        return f"{name} [unsupported in current env]"
+
     print("\n=== Movement Classes Guide ===")
-    print("1) No_Movement")
-    print("2) Wrist_Flexion")
-    print("3) Wrist_Extension")
-    print("4) Wrist_Pronation")
-    print("5) Wrist_Supination")
-    print("6) Chuck_Grip")
-    print("7) Hand_Open")
+    print(f"1) {_label('No_Movement')}")
+    print(f"2) {_label('Wrist_Flexion')}")
+    print(f"3) {_label('Wrist_Extension')}")
+    print(f"4) {_label('Wrist_Pronation')}")
+    print(f"5) {_label('Wrist_Supination')}")
+    print(f"6) {_label('Chuck_Grip')}")
+    print(f"7) {_label('Hand_Open')}")
     print("8) Exit")
 
 
-def get_movement_from_user():
+def get_movement_from_user(supported_movements=None):
     """
     Prompts for movement selection 1-8 and returns movement name or None for exit.
     """
@@ -61,7 +69,7 @@ def get_movement_from_user():
     }
 
     while True:
-        print_movement_guide()
+        print_movement_guide(supported_movements)
         choice = input("Select movement (1-8): ").strip()
         if choice in movement_map:
             return movement_map[choice]
@@ -84,6 +92,11 @@ def _configure_git_executable():
 
 
 def _get_actuator_names(env):
+    """
+    Docstring for _get_actuator_names
+    
+    :param env: Description
+    """
     try:
         unwrapped = env.unwrapped
         model = getattr(unwrapped, "model", None)
@@ -115,40 +128,64 @@ def _get_actuator_names(env):
     return []
 
 
-def run_manual_controller(time):
+def run_manual_controller(time_value):
     _configure_git_executable()
+    
+    # Enable debug mode to see actuator matching
+    os.environ["DEBUG_MAPPING"] = "1"
 
-    env_id = os.getenv("MYOSUITE_ENV", "myoArmReachFixed-v0")
+    env_id = os.getenv("MYOSUITE_ENV", "myoHandReachFixed-v0")
     print(f"\nStarting MyoSuite env: {env_id}")
 
     env = gym.make(env_id)
     env.reset()
 
     actuator_names = _get_actuator_names(env)
+    profile_name, supported_movements = get_supported_movement_classes(actuator_names)
 
     if not actuator_names:
         print("Warning: actuator names not found. Movement LUT may be empty.")
+    else:
+        print(f"\n=== ACTUATOR DEBUG INFO ===")
+        print(f"Detected profile: {profile_name}")
+        print(f"Total actuators: {len(actuator_names)}")
+        print("Available actuators:")
+        for i, name in enumerate(actuator_names):
+            print(f"  {i:3d}: {name}")
+        print(f"Supported movements: {sorted(supported_movements)}")
+        print("=" * 50 + "\n")
 
     step_count = 0
     try:
         while True:
-            movement = get_movement_from_user()
+            movement = get_movement_from_user(supported_movements)
             if movement is None:
                 print("Exiting controller.")
                 return
+
+            if movement not in supported_movements and movement != "No_Movement":
+                print(f"Movement '{movement}' is not supported by env '{env_id}' (profile: {profile_name}).")
+                print("Choose a different movement or switch to a different MyoSuite environment.")
+                continue
 
             action = get_MyoSuite_Movement_LUT(
                 movement_name=movement,
                 action_size=env.action_space.shape[0],
                 actuator_names=actuator_names,
             )
+
+            if movement != "No_Movement" and not np.any(action):
+                print(f"Movement '{movement}' produced no active actuators in env '{env_id}'.")
+                print("This environment does not expose a matching control for that movement.")
+                continue
+
             action = np.array(action, dtype=float)
             action = np.clip(action, env.action_space.low, env.action_space.high)
 
             print(f"Selected movement: {movement}")
-            print(f"Running for {time} seconds... Close the window or press Ctrl+C to stop.")
+            print(f"Running for {time_value} seconds... Close the window or press Ctrl+C to stop.")
 
-            end_time = time.time() + time
+            end_time = time.time() + time_value
             while time.time() < end_time:
                 env.unwrapped.mj_render()
                 env.step(action)
@@ -168,7 +205,7 @@ def controller_menu():
     run_manual_controller(5) # run for 5 seconds
 
 def main():
-    while True:
+    while True: # choice handler (loop)
         show_main_menu()
         choice = input("Select option (1-3): ").strip()
         if choice == "1":
