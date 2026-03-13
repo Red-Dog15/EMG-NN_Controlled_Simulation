@@ -6,6 +6,8 @@ import os
 import shutil
 import sys
 import time
+import json
+from pathlib import Path
 
 import numpy as np
 
@@ -16,7 +18,6 @@ from config import (
     DEFAULT_ENV_ID,
     DEFAULT_MANUAL_RUNTIME_SECONDS,
     MOVEMENT_MENU_MAP,
-    get_movement_env_routing,
 )
 
 SCRIPTS_DATA_DIR = os.path.abspath(
@@ -26,6 +27,9 @@ if SCRIPTS_DATA_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DATA_DIR)
 
 from Data_Mapping import get_MyoSuite_Movement_LUT
+
+
+JOINT_TUNING_DIR = Path(__file__).resolve().parent.parent / "Output" / "joint_tuning"
 
 
 def show_main_menu():
@@ -62,17 +66,72 @@ def get_movement_from_user():
         print("Invalid selection. Please choose 1-8.")
 
 
-def _resolve_env_for_movement(movement_name, default_env_id, movement_env_routing):
-    if movement_name == "No_Movement":
-        return default_env_id
-    return movement_env_routing.get(movement_name, default_env_id)
-
-
 def _open_env(env_id):
     env = gym.make(env_id)
     env.reset()
     actuator_names = _get_actuator_names(env)
     return env, actuator_names
+
+
+def _get_joint_name(model, idx):
+    try:
+        return model.joint(idx).name
+    except Exception:
+        pass
+    try:
+        return model.joint_id2name(idx)
+    except Exception:
+        return f"joint_{idx}"
+
+
+def _load_exported_joint_targets(movement_name):
+    """Load midpoint target qpos per joint from exported tuning JSON."""
+    path = JOINT_TUNING_DIR / f"{movement_name}.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        ranges = payload.get("target_jnt_range") or payload.get("suggested_variant_kwargs", {}).get("target_jnt_range")
+        if not isinstance(ranges, dict):
+            return None
+
+        targets = {}
+        for joint_name, bounds in ranges.items():
+            if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+                continue
+            low, high = float(bounds[0]), float(bounds[1])
+            targets[joint_name] = (low + high) / 2.0
+        return targets if targets else None
+    except Exception:
+        return None
+
+
+def _resolve_joint_qpos_targets(env, joint_targets):
+    """Resolve exported joint-name targets to qpos-index targets for current env."""
+    sim = env.unwrapped.sim
+    model = sim.model
+    resolved = {}
+
+    for j in range(model.njnt):
+        name = _get_joint_name(model, j)
+        if name not in joint_targets:
+            continue
+        qidx = int(model.jnt_qposadr[j])
+        qlow = float(model.jnt_range[j][0])
+        qhigh = float(model.jnt_range[j][1])
+        qtarget = max(qlow, min(qhigh, float(joint_targets[name])))
+        resolved[qidx] = qtarget
+
+    return resolved
+
+
+def _apply_joint_targets_step(env, qpos_targets, blend=0.35):
+    """Blend current qpos toward exported movement target pose."""
+    sim = env.unwrapped.sim
+    for qidx, target in qpos_targets.items():
+        cur = float(sim.data.qpos[qidx])
+        sim.data.qpos[qidx] = (1.0 - blend) * cur + blend * target
+    sim.forward()
 
 
 def _configure_git_executable():
@@ -133,17 +192,16 @@ def run_manual_controller(time_value):
     # Enable debug mode to inspect matching while you build custom task envs.
     os.environ["DEBUG_MAPPING"] = DEBUG_MAPPING_DEFAULT
 
-    default_env_id = DEFAULT_ENV_ID
-    movement_env_routing = get_movement_env_routing()
-    env = None
-    actuator_names = []
-    current_env_id = None
-
-    print("\n=== Movement -> Environment Routing ===")
-    for movement, env_id in movement_env_routing.items():
-        print(f"  {movement}: {env_id}")
-    print(f"Default env (No_Movement): {default_env_id}")
+    # Manual mode intentionally stays in a single environment for all movements.
+    current_env_id = DEFAULT_ENV_ID
+    env, actuator_names = _open_env(current_env_id)
+    print("\n=== Manual Controller Environment ===")
+    print(f"All movements run in: {current_env_id}")
     print("=" * 50)
+    if not actuator_names:
+        print("Warning: actuator names not found. Movement LUT may be empty.")
+    else:
+        print(f"Total actuators in {current_env_id}: {len(actuator_names)}")
 
     step_count = 0
     try:
@@ -153,37 +211,39 @@ def run_manual_controller(time_value):
                 print("Exiting controller.")
                 return
 
-            target_env_id = _resolve_env_for_movement(
-                movement,
-                default_env_id,
-                movement_env_routing,
-            )
+            # Prefer exported joint tuning when available for this movement.
+            exported_joint_targets = None
+            resolved_qpos_targets = None
+            if movement != "No_Movement":
+                exported_joint_targets = _load_exported_joint_targets(movement)
+                if exported_joint_targets:
+                    resolved_qpos_targets = _resolve_joint_qpos_targets(env, exported_joint_targets)
+                    if resolved_qpos_targets:
+                        print(
+                            f"Using exported joint tuning for '{movement}' "
+                            f"({len(resolved_qpos_targets)} joints matched in {current_env_id})."
+                        )
+                    else:
+                        print(
+                            f"Export found for '{movement}', but no matching joints in '{current_env_id}'. "
+                            "Falling back to legacy actuator LUT."
+                        )
 
-            if env is None or target_env_id != current_env_id:
-                if env is not None:
-                    env.close()
-                print(f"\nSwitching environment -> {target_env_id}")
-                env, actuator_names = _open_env(target_env_id)
-                current_env_id = target_env_id
+            action = None
+            if not resolved_qpos_targets:
+                action = get_MyoSuite_Movement_LUT(
+                    movement_name=movement,
+                    action_size=env.action_space.shape[0],
+                    actuator_names=actuator_names,
+                )
 
-                if not actuator_names:
-                    print("Warning: actuator names not found. Movement LUT may be empty.")
-                else:
-                    print(f"Total actuators in {current_env_id}: {len(actuator_names)}")
+                if movement != "No_Movement" and not np.any(action):
+                    print(f"Movement '{movement}' produced no active actuators in '{current_env_id}'.")
+                    print("This movement has no mapped actuators in the current single-environment setup.")
+                    continue
 
-            action = get_MyoSuite_Movement_LUT(
-                movement_name=movement,
-                action_size=env.action_space.shape[0],
-                actuator_names=actuator_names,
-            )
-
-            if movement != "No_Movement" and not np.any(action):
-                print(f"Movement '{movement}' produced no active actuators in '{current_env_id}'.")
-                print("Change routing in simulation/config.py or update your custom task env mapping.")
-                continue
-
-            action = np.array(action, dtype=float)
-            action = np.clip(action, env.action_space.low, env.action_space.high)
+                action = np.array(action, dtype=float)
+                action = np.clip(action, env.action_space.low, env.action_space.high)
 
             print(f"Selected movement: {movement} (env: {current_env_id})")
             print(f"Running for {time_value} seconds... Close the window or press Ctrl+C to stop.")
@@ -191,7 +251,12 @@ def run_manual_controller(time_value):
             end_time = time.time() + time_value
             while time.time() < end_time:
                 env.unwrapped.mj_render()
-                env.step(action)
+                if resolved_qpos_targets:
+                    _apply_joint_targets_step(env, resolved_qpos_targets, blend=0.35)
+                    # Advance one frame for dynamics/contacts while preserving pose drive.
+                    env.unwrapped.sim.advance(substeps=1, render=False)
+                else:
+                    env.step(action)
                 step_count += 1
 
                 if step_count % 100 == 0:

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 try:
-    from config import MOVEMENT_CLASSES
+    from config import MOVEMENT_CLASSES, DEFAULT_ENV_ID as _CONFIG_ENV_ID
 except Exception:
     MOVEMENT_CLASSES = (
         "No_Movement",
@@ -32,6 +32,7 @@ except Exception:
         "Chuck_Grip",
         "Hand_Open",
     )
+    _CONFIG_ENV_ID = "myoHandReachFixed-v0"
 
 
 @dataclass
@@ -390,6 +391,8 @@ def export_movement_ranges(movement: str, ranges: Dict[str, Tuple[float, float]]
 def print_help() -> None:
     print("\nCommands:")
     print("  help")
+    print("  tasks                         -> list all movement classes")
+    print("  task <movement_class>         -> select which movement you are tuning (no env switch)")
     print("  list [filter]                 -> show joints and ranges")
     print("  set <joint_name_or_idx> <v>   -> set one qpos value")
     print("  neutral                       -> zero all joints (flat neutral pose)")
@@ -405,14 +408,15 @@ def print_help() -> None:
     print("  mark <joint> <low> <high>     -> add target_jnt_range candidate")
     print("  unmark <joint>                -> remove candidate")
     print("  marked                        -> show marked ranges")
-    print("  export <movement_class>       -> write JSON and print config snippet")
+    print("  export [movement_class]       -> write JSON for current/specified movement")
     print("  reset                         -> env.reset()")
     print("  quit")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="MyoSuite joint tuning sandbox")
-    parser.add_argument("--env", default="myoHandPoseFixed-v0", help="MyoSuite env id")
+    parser.add_argument("--env", default=_CONFIG_ENV_ID, help="MyoSuite env id (default from config)")
+    parser.add_argument("--movement", default=None, help="Movement class to tune (can change with 'task' command)")
     parser.add_argument("--show-on-start", action="store_true", help="Print full joint list at startup")
     args = parser.parse_args()
 
@@ -420,11 +424,21 @@ def main() -> None:
 
     from myosuite.utils import gym
 
-    print(f"Opening environment: {args.env}")
+    print(f"Opening environment: {args.env}  [single env, all tasks]")
     env = gym.make(args.env)
     env.reset()
     marked_ranges: Dict[str, Tuple[float, float]] = {}
     baseline_qpos = _capture_joint_qpos_map(env)
+
+    # Track which movement task is currently being tuned without switching env.
+    current_movement: Optional[str] = args.movement
+    if current_movement and current_movement not in MOVEMENT_CLASSES:
+        print(f"Warning: --movement '{current_movement}' not in MOVEMENT_CLASSES. Ignored.")
+        current_movement = None
+    if current_movement:
+        print(f"Tuning movement: {current_movement}")
+    else:
+        print("No movement selected. Use 'task <name>' to set one, or pass --movement.")
 
     if args.show_on_start:
         print_joint_table(env)
@@ -433,7 +447,8 @@ def main() -> None:
 
     try:
         while True:
-            raw = input("\ntune> ").strip()
+            prompt = f"\ntune[{current_movement}]> " if current_movement else "\ntune> "
+            raw = input(prompt).strip()
             if not raw:
                 continue
 
@@ -477,6 +492,28 @@ def main() -> None:
             if cmd == "ctrl":
                 limit = int(parts[1]) if len(parts) > 1 else 12
                 print_control_summary(env, limit)
+                continue
+
+            if cmd == "tasks":
+                print("\nAvailable movement classes:")
+                for m in MOVEMENT_CLASSES:
+                    marker = " <-- current" if m == current_movement else ""
+                    print(f"  {m}{marker}")
+                continue
+
+            if cmd == "task":
+                if len(parts) != 2:
+                    print("Usage: task <movement_class>")
+                    continue
+                name = parts[1]
+                if name not in MOVEMENT_CLASSES:
+                    print(f"Unknown movement '{name}'. Use 'tasks' to list options.")
+                    continue
+                if name == "No_Movement":
+                    print("No_Movement does not have a pose to tune. Choose a movement class.")
+                    continue
+                current_movement = name
+                print(f"Now tuning: {current_movement}  (env unchanged: {args.env})")
                 continue
 
             if cmd == "baseline":
@@ -541,10 +578,13 @@ def main() -> None:
                 continue
 
             if cmd == "export":
-                if len(parts) != 2:
-                    print("Usage: export <movement_class>")
+                if len(parts) == 2:
+                    movement = parts[1]
+                elif current_movement:
+                    movement = current_movement
+                else:
+                    print("Usage: export <movement_class>  (or set a current task with 'task <name>')")
                     continue
-                movement = parts[1]
                 if movement not in MOVEMENT_CLASSES:
                     print(f"Unknown movement '{movement}'. Expected one of: {', '.join(MOVEMENT_CLASSES)}")
                     continue
@@ -552,7 +592,7 @@ def main() -> None:
                     print("No_Movement does not need target_jnt_range export.")
                     continue
                 if not marked_ranges:
-                    print("No marked ranges. Use 'mark' first.")
+                    print("No marked ranges. Use 'mark' or 'auto_mark' first.")
                     continue
 
                 out = export_movement_ranges(movement, marked_ranges)

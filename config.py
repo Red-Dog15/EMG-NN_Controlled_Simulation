@@ -40,30 +40,11 @@ MOVEMENT_MENU_MAP: Dict[str, Optional[str]] = {
 }
 
 
-# Default environment when movement is No_Movement or fallback is needed.
+# Single environment used for ALL movement tasks.
+# All movements share this env; per-movement pose targets are stored in
+# Output/joint_tuning/<Movement>.json and applied at runtime via joint qpos driving.
 DEFAULT_ENV_ID: str = os.getenv("MYOSUITE_ENV", "myoHandReachFixed-v0")
-
-
-# Fallback route per movement when env vars are not configured.
-MOVEMENT_ENV_FALLBACKS: Dict[str, str] = {
-	"Wrist_Flexion": "myoHandReachFixed-v0",
-	"Wrist_Extension": "myoHandReachFixed-v0",
-	"Wrist_Pronation": "myoHandKeyTurnFixed-v0",
-	"Wrist_Supination": "myoArmReachFixed-v0",
-	"Chuck_Grip": "myoHandReachFixed-v0",
-	"Hand_Open": "myoHandReachFixed-v0",
-}
-
-
-# Env var names for overriding each movement route.
-MOVEMENT_ENV_VARS: Dict[str, str] = {
-	"Wrist_Flexion": "MYOSUITE_ENV_WRIST_FLEXION",
-	"Wrist_Extension": "MYOSUITE_ENV_WRIST_EXTENSION",
-	"Wrist_Pronation": "MYOSUITE_ENV_WRIST_PRONATION",
-	"Wrist_Supination": "MYOSUITE_ENV_WRIST_SUPINATION",
-	"Chuck_Grip": "MYOSUITE_ENV_CHUCK_GRIP",
-	"Hand_Open": "MYOSUITE_ENV_HAND_OPEN",
-}
+TASK_ENV_ID: str = DEFAULT_ENV_ID  # explicit alias: the one env for all tasks
 
 
 # Optional per-movement variant kwargs merged into a base env spec when registered
@@ -80,12 +61,12 @@ MOVEMENT_VARIANT_KWARGS: Dict[str, Dict[str, object]] = {
 
 
 def get_movement_env_routing() -> Dict[str, str]:
-	"""Build movement routing using env var overrides with stable fallbacks."""
-	routing: Dict[str, str] = {}
-	for movement, fallback_env in MOVEMENT_ENV_FALLBACKS.items():
-		env_var = MOVEMENT_ENV_VARS[movement]
-		routing[movement] = os.getenv(env_var, fallback_env)
-	return routing
+	"""Return routing for all movement classes, all mapped to the single TASK_ENV_ID."""
+	return {
+		movement: TASK_ENV_ID
+		for movement in MOVEMENT_CLASSES
+		if movement != "No_Movement"
+	}
 
 
 # Debug flag consumed by mapping code.
