@@ -255,6 +255,7 @@ def run_manual_controller(time_value):
         print("Note: passive viewer unavailable for this env backend; use MyoSuite's built-in render.")
     else:
         print("Passive viewer opened.  Press 'v' in the movement menu to adjust skin/camera.")
+        print("Using passive viewer only (built-in env window disabled to avoid conflicting visuals).")
 
     step_count = 0
     # Keep action continuity across movement selections for smooth muscle transitions.
@@ -273,6 +274,8 @@ def run_manual_controller(time_value):
             if movement == "__viewer__":
                 passive_viewer = run_viewer_submenu(env, passive_viewer)
                 continue
+
+            is_no_movement = movement == "No_Movement"
 
             # Prefer exported joint tuning when available for this movement.
             exported_joint_targets = None
@@ -293,7 +296,12 @@ def run_manual_controller(time_value):
                         )
 
             action = None
-            if not resolved_qpos_targets:
+            if is_no_movement:
+                # Explicit pass/idle state: no commanded movement.
+                action = np.zeros(env.action_space.shape[0], dtype=float)
+                resolved_qpos_targets = None
+                print("No_Movement selected: issuing zero activation (pass state).")
+            elif not resolved_qpos_targets:
                 action = get_MyoSuite_Movement_LUT(
                     movement_name=movement,
                     action_size=env.action_space.shape[0],
@@ -321,11 +329,19 @@ def run_manual_controller(time_value):
 
             target_action = action if action is not None else prev_action.copy()
             start_action = prev_action.copy()
+            if is_no_movement:
+                # Do not blend from previous movement into idle; stop immediately.
+                start_action = target_action.copy()
+                prev_action = target_action.copy()
 
             end_time = time.time() + time_value
             while time.time() < end_time:
-                env.unwrapped.mj_render()
-                if resolved_qpos_targets:
+                if passive_viewer is None:
+                    env.unwrapped.mj_render()
+                if is_no_movement:
+                    # Pass state: intentionally do not advance physics.
+                    time.sleep(getattr(env, "dt", 0.01))
+                elif resolved_qpos_targets:
                     phase = (time.time() - seg_start_time) / transition_seconds
                     _apply_joint_targets_interp(env, start_qpos_targets, resolved_qpos_targets, phase=phase)
                     env.unwrapped.sim.advance(substeps=1, render=False)
