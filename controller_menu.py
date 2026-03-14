@@ -27,6 +27,7 @@ if SCRIPTS_DATA_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DATA_DIR)
 
 from Data_Mapping import get_MyoSuite_Movement_LUT
+from run_nn import run_nn_mode
 from viewer_utils import (
     close_passive_viewer,
     open_passive_viewer,
@@ -46,9 +47,10 @@ def show_main_menu():
 
 
 def nn_implementation_placeholder():
-    print("\nNN implementation is not wired yet.")
-    # Placeholder for future NN integration
-    pass
+    print("\n=== NN-Driven Simulation ===")
+    csv_input = input("Path to EMG CSV (Enter to use interactive menu): ").strip()
+    csv_path = csv_input if csv_input else None
+    run_nn_mode(csv_path=csv_path)
 
 
 def print_movement_guide():

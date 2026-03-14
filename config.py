@@ -79,11 +79,23 @@ MAIN_RANDOM_ENV_ID: str = os.getenv("MYOSUITE_MAIN_ENV", DEFAULT_ENV_ID)
 DUMP_ACTUATORS_ON_START: bool = os.getenv("MYOSUITE_DUMP_ACTUATORS", "0") == "1"
 
 
-# NN integration placeholders (future simulation + NN bridge reads from here).
+# NN integration — simulation + NN bridge.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 NN_DEFAULT_MODEL_PATH: str = os.getenv(
 	"NN_MODEL_PATH",
-	str(PROJECT_ROOT / "NN" / "models" / "final_model_full.pth"),
+	str(PROJECT_ROOT / "Scripts" / "NN" / "models" / "final_model_full.pth"),
 )
 NN_WINDOW_SIZE: int = int(os.getenv("NN_WINDOW_SIZE", "100"))
 NN_INFERENCE_STRIDE: int = int(os.getenv("NN_INFERENCE_STRIDE", "25"))
+
+# Path to the .venv Python that has PyTorch/pandas installed (Scripts env).
+# Override with the NN_VENV_PYTHON env-var if your layout differs.
+VENV_PYTHON_PATH: str = os.getenv(
+	"NN_VENV_PYTHON",
+	str(PROJECT_ROOT / "Scripts" / ".venv" / "Scripts" / "python.exe"),
+)
+
+# Absolute path to the inference subprocess worker script.
+NN_INFERENCE_WORKER_PATH: str = str(
+	PROJECT_ROOT / "Scripts" / "NN" / "inference_worker.py"
+)
