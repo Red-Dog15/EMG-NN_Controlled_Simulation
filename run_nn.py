@@ -31,6 +31,11 @@ from pathlib import Path
 
 import numpy as np
 
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
 # ── path setup ────────────────────────────────────────────────────────────────
 _SIM_DIR = Path(__file__).resolve().parent          # simulation/
 _PROJ_ROOT = _SIM_DIR.parent                        # program/
@@ -47,10 +52,15 @@ for _p in (_SCRIPTS_DIR, _SCRIPTS_DATA_DIR):
 
 # ── local imports ─────────────────────────────────────────────────────────────
 from config import (
+    NN_ACTIVE_STEP_SLEEP_FACTOR,
     DEFAULT_ENV_ID,
     NN_DEFAULT_MODEL_PATH,
     NN_INFERENCE_STRIDE,
     NN_INFERENCE_WORKER_PATH,
+    NN_NO_MOVEMENT_HOLD_SLEEP_FACTOR,
+    NN_SEVERITY_TRANSITION_DURATION_FACTOR,
+    NN_TRANSITION_BASE_FRACTION,
+    NN_TRANSITION_MIN_STEPS,
     NN_WINDOW_SIZE,
     VENV_PYTHON_PATH,
 )
@@ -72,18 +82,57 @@ _EXAMPLE_DATA_DIR = _SCRIPTS_DATA_DIR / "Example_data"
 JOINT_TUNING_DIR = _PROJ_ROOT / "Output" / "joint_tuning"
 
 
+def _poll_runtime_command():
+    """Read non-blocking single-key runtime commands on Windows terminals."""
+    if msvcrt is None:
+        return None
+    try:
+        while msvcrt.kbhit():
+            key = msvcrt.getwch().lower()
+            if key in {"\x00", "\xe0"}:
+                if msvcrt.kbhit():
+                    msvcrt.getwch()
+                continue
+            if key == "b":
+                return "back"
+            if key == "q":
+                return "quit"
+    except Exception:
+        return None
+    return None
+
+
+def _resolve_severity_name(prediction: dict) -> str:
+    """Resolve severity label robustly from worker output."""
+    severity_name = prediction.get("severity_name")
+    if severity_name in NN_SEVERITY_TRANSITION_DURATION_FACTOR:
+        return severity_name
+
+    severity_pred = prediction.get("severity_pred")
+    try:
+        severity_pred = int(severity_pred)
+    except Exception:
+        severity_pred = None
+
+    return _SEVERITY_LABELS.get(severity_pred, "Medium")
+
+
 def _csv_for(movement_idx: int, severity: str) -> str:
     """Resolve Example_data filename: S1_{Severity}_C{idx+1}_R1.csv"""
     return str(_EXAMPLE_DATA_DIR / f"S1_{severity}_C{movement_idx + 1}_R1.csv")
 
 
-def _pick_from_menu(title: str, options: dict) -> str:
-    """Print a numbered menu and return the chosen value."""
+def _pick_from_menu(title: str, options: dict, allow_back: bool = False):
+    """Print a numbered menu and return selected value or None on back."""
     print(f"\n=== {title} ===")
     for key, label in options.items():
         print(f"  {key}) {label}")
+    if allow_back:
+        print("  b) Back")
     while True:
         choice = input("Select: ").strip()
+        if allow_back and choice.lower() in {"b", "back"}:
+            return None
         if choice in options:
             return options[choice]
         print("Invalid selection, try again.")
@@ -93,8 +142,8 @@ _MODELS_DIR = _SCRIPTS_DIR / "NN" / "models"
 
 _MODEL_ARCH_MENU: dict[str, tuple[str, str]] = {
     "1": ("NN-A  Full CNN+GRU", "full"),
-    "3": ("NN-B  Standard CNN", "standard_cnn"),
-    "5": ("NN-C  Lightweight CNN", "lightweight"),
+    "2": ("NN-B  Standard CNN", "standard_cnn"),
+    "3": ("NN-C  Lightweight CNN", "lightweight"),
 }
 
 _MODEL_VARIANT_MENU: dict[str, str] = {
@@ -112,63 +161,89 @@ _MODEL_FILENAME_MAP: dict[tuple[str, str], str] = {
 }
 
 
-def _pick_model() -> str:
-    """Menu to select which trained model checkpoint to load. Returns absolute path."""
-    print("\n=== Select Model Architecture ===")
-    for key, (label, model_key) in _MODEL_ARCH_MENU.items():
-        best_exists = (_MODELS_DIR / _MODEL_FILENAME_MAP[(model_key, "best")]).is_file()
-        final_exists = (_MODELS_DIR / _MODEL_FILENAME_MAP[(model_key, "final")]).is_file()
-        exists = "✓" if (best_exists or final_exists) else "missing"
-        print(f"  {key}) {label:<28} {exists}")
+def _pick_model() -> str | None:
+    """Two-level model picker. Returns absolute path, or None when user quits."""
     while True:
-        choice = input("Select architecture (1/3/5): ").strip()
-        if choice in _MODEL_ARCH_MENU:
-            break
-        print("Invalid selection, try again.")
+        print("\n=== Select Model Architecture ===")
+        for key, (label, model_key) in _MODEL_ARCH_MENU.items():
+            best_exists = (_MODELS_DIR / _MODEL_FILENAME_MAP[(model_key, "best")]).is_file()
+            final_exists = (_MODELS_DIR / _MODEL_FILENAME_MAP[(model_key, "final")]).is_file()
+            exists = "✓" if (best_exists or final_exists) else "missing"
+            print(f"  {key}) {label:<28} {exists}")
+        print("  q) Quit")
 
-    label, model_key = _MODEL_ARCH_MENU[choice]
-    print(f"\n=== Select Checkpoint Variant for {label} ===")
-    for key, variant in _MODEL_VARIANT_MENU.items():
-        fname = _MODEL_FILENAME_MAP[(model_key, variant)]
-        exists = "✓" if (_MODELS_DIR / fname).is_file() else "missing"
-        print(f"  {key}) {variant:<5} {exists}")
+        arch_choice = input("Select architecture (1/2/3, q=quit): ").strip().lower()
+        if arch_choice in {"q", "quit", "exit"}:
+            return None
+        if arch_choice not in _MODEL_ARCH_MENU:
+            print("Invalid selection, try again.")
+            continue
 
+        label, model_key = _MODEL_ARCH_MENU[arch_choice]
+        while True:
+            print(f"\n=== Select Checkpoint Variant for {label} ===")
+            for key, variant in _MODEL_VARIANT_MENU.items():
+                fname = _MODEL_FILENAME_MAP[(model_key, variant)]
+                exists = "✓" if (_MODELS_DIR / fname).is_file() else "missing"
+                print(f"  {key}) {variant:<5} {exists}")
+            print("  b) Back")
+            print("  q) Quit")
+
+            variant_choice = input("Select variant (1=best, 2=final, b=back, q=quit): ").strip().lower()
+            if variant_choice in {"b", "back"}:
+                break
+            if variant_choice in {"q", "quit", "exit"}:
+                return None
+            if variant_choice in _MODEL_VARIANT_MENU:
+                variant = _MODEL_VARIANT_MENU[variant_choice]
+                fname = _MODEL_FILENAME_MAP[(model_key, variant)]
+                return str(_MODELS_DIR / fname)
+            print("Invalid selection, try again.")
+
+
+def _prompt_csv() -> str | None:
+    """Interactive menu: returns CSV path, or None when user quits/backs out."""
     while True:
-        variant_choice = input("Select variant (1=best, 2=final): ").strip()
-        if variant_choice in _MODEL_VARIANT_MENU:
-            variant = _MODEL_VARIANT_MENU[variant_choice]
-            fname = _MODEL_FILENAME_MAP[(model_key, variant)]
-            return str(_MODELS_DIR / fname)
-        print("Invalid selection, try again.")
+        mode = _pick_from_menu(
+            "NN Mode",
+            {
+                "1": "Input mode   — specify a CSV path",
+                "2": "Control mode — select movement class + severity",
+                "q": "Quit",
+            },
+        )
 
+        if mode == "Quit":
+            return None
 
-def _prompt_csv() -> str:
-    """Interactive menu: returns a CSV path based on mode/movement/severity choice."""
-    mode = _pick_from_menu(
-        "NN Mode",
-        {"1": "Input mode   — specify a CSV path",
-         "2": "Control mode — select movement class + severity"},
-    )
+        if "Input" in mode:
+            path = input("CSV path (or b=back): ").strip()
+            if path.lower() in {"b", "back"}:
+                continue
+            return path
 
-    if "Input" in mode:
-        path = input("CSV path: ").strip()
-        return path
+        # Control mode with back navigation
+        while True:
+            movement_name = _pick_from_menu(
+                "Select Movement Class",
+                {str(k): v for k, v in _MOVEMENT_LABELS.items()},
+                allow_back=True,
+            )
+            if movement_name is None:
+                break
 
-    # Control mode
-    movement_name = _pick_from_menu(
-        "Select Movement Class",
-        {str(k): v for k, v in _MOVEMENT_LABELS.items()},
-    )
-    movement_idx = next(k for k, v in _MOVEMENT_LABELS.items() if v == movement_name)
+            movement_idx = next(k for k, v in _MOVEMENT_LABELS.items() if v == movement_name)
+            severity = _pick_from_menu(
+                "Select Severity",
+                {str(k): v for k, v in _SEVERITY_LABELS.items()},
+                allow_back=True,
+            )
+            if severity is None:
+                continue
 
-    severity = _pick_from_menu(
-        "Select Severity",
-        {str(k): v for k, v in _SEVERITY_LABELS.items()},
-    )
-
-    csv_path = _csv_for(movement_idx, severity)
-    print(f"[run_nn] Resolved CSV: {csv_path}")
-    return csv_path
+            csv_path = _csv_for(movement_idx, severity)
+            print(f"[run_nn] Resolved CSV: {csv_path}")
+            return csv_path
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -392,6 +467,9 @@ def run_nn_mode(
     """
     # ── resolve model ─────────────────────────────────────────────────────────
     model_path = model_path or _pick_model()
+    if not model_path:
+        print("[run_nn] Cancelled by user.")
+        return
     if not os.path.isfile(model_path):
         print(f"[run_nn] Model not found: {model_path}")
         return
@@ -433,6 +511,9 @@ def run_nn_mode(
             # ── pick movement for this pass ───────────────────────────────────
             if current_csv is None:
                 current_csv = _prompt_csv()
+                if not current_csv:
+                    print("[run_nn] Exiting NN mode.")
+                    break
 
             if not os.path.isfile(current_csv):
                 print(f"[run_nn] CSV not found: {current_csv}")
@@ -444,10 +525,22 @@ def run_nn_mode(
                 f"\n[run_nn] Running {len(windows)} windows from: {os.path.basename(current_csv)}"
                 f"  (printing every {print_every})\n"
             )
+            print("[run_nn] Runtime controls: press 'b' to abort to movement selection, 'q' to quit.")
 
             # ── inference + sim loop ──────────────────────────────────────────
             viewer_closed = False
+            abort_to_selection = False
+            quit_requested = False
             for window_idx, window in enumerate(windows):
+                runtime_cmd = _poll_runtime_command()
+                if runtime_cmd == "back":
+                    print("[run_nn] Current replay aborted. Returning to movement selection.")
+                    abort_to_selection = True
+                    break
+                if runtime_cmd == "quit":
+                    print("[run_nn] Quit requested.")
+                    quit_requested = True
+                    break
                 if passive_viewer is not None and not sync_passive_viewer(passive_viewer):
                     print("[run_nn] Viewer closed — stopping.")
                     viewer_closed = True
@@ -456,6 +549,13 @@ def run_nn_mode(
                 prediction = _predict(worker, window)
                 movement_name = prediction["movement_name"]
                 confidence = prediction["movement_confidence"]
+                severity_name = _resolve_severity_name(prediction)
+                severity_pred = prediction.get("severity_pred", "?")
+                severity_confidence = float(prediction.get("severity_confidence", 0.0))
+                duration_factor = NN_SEVERITY_TRANSITION_DURATION_FACTOR.get(severity_name, 1.0)
+                is_no_movement = movement_name == "No_Movement"
+                # Keep inference/update cadence fixed; severity affects transition dynamics only.
+                window_steps = max(1, int(steps_per_window))
 
                 # Throttled print: first window, every Nth, and last window
                 is_milestone = (
@@ -466,41 +566,66 @@ def run_nn_mode(
                 if is_milestone:
                     print(
                         f"  window {window_idx + 1:>4}/{len(windows)} | "
-                        f"{movement_name:<20} | conf={confidence:.2f}"
+                        f"{movement_name:<20} | sev={severity_name:<6} ({severity_pred}) | "
+                        f"sev_conf={severity_confidence:.2f} | mov_conf={confidence:.2f} | "
+                        f"dur={duration_factor:.2f} | steps={window_steps}"
                     )
 
                 exported_joint_targets = None
                 resolved_qpos_targets = None
-                if movement_name != "No_Movement":
+                if not is_no_movement:
                     exported_joint_targets = _load_exported_joint_targets(movement_name)
                     if exported_joint_targets:
                         resolved_qpos_targets = _resolve_joint_qpos_targets(env, exported_joint_targets)
 
-                action = results_to_action(
-                    {"movement_name": movement_name},
-                    actuator_names,
-                    action_size=action_size,
-                )
-                action = np.clip(
-                    np.array(action, dtype=float),
-                    env.action_space.low,
-                    env.action_space.high,
-                )
+                if is_no_movement:
+                    # Pass/idle state: command zero activation but keep simulation alive.
+                    action = np.zeros(action_size, dtype=float)
+                else:
+                    action = results_to_action(
+                        {"movement_name": movement_name},
+                        actuator_names,
+                        action_size=action_size,
+                    )
+                    action = np.clip(
+                        np.array(action, dtype=float),
+                        env.action_space.low,
+                        env.action_space.high,
+                    )
 
-                transition_steps = max(1, steps_per_window // 4)
-                for sub_step in range(steps_per_window):
+                transition_steps = int(round(float(window_steps) * float(NN_TRANSITION_BASE_FRACTION) * float(duration_factor)))
+                transition_steps = max(int(NN_TRANSITION_MIN_STEPS), transition_steps)
+                qpos_transition_steps = transition_steps
+                last_applied_action = prev_action.copy()
+                for sub_step in range(window_steps):
+                    runtime_cmd = _poll_runtime_command()
+                    if runtime_cmd == "back":
+                        print("[run_nn] Current replay aborted. Returning to movement selection.")
+                        abort_to_selection = True
+                        break
+                    if runtime_cmd == "quit":
+                        print("[run_nn] Quit requested.")
+                        quit_requested = True
+                        break
                     if passive_viewer is None:
                         env.unwrapped.mj_render()
-                    if resolved_qpos_targets:
+                    if is_no_movement:
+                        env.step(action)
+                        last_applied_action = action
+                        time.sleep(getattr(env.unwrapped, "dt", 0.01) * float(NN_NO_MOVEMENT_HOLD_SLEEP_FACTOR))
+                    elif resolved_qpos_targets:
                         if sub_step == 0:
                             sim = env.unwrapped.sim
                             start_qpos_targets = {
                                 qidx: float(sim.data.qpos[qidx])
                                 for qidx in resolved_qpos_targets.keys()
                             }
-                        phase = (sub_step + 1) / max(1, steps_per_window)
+                        phase = (sub_step + 1) / qpos_transition_steps
+                        if phase > 1.0:
+                            phase = 1.0
                         _apply_joint_targets_interp(env, start_qpos_targets, resolved_qpos_targets, phase=phase)
                         env.unwrapped.sim.advance(substeps=1, render=False)
+                        time.sleep(getattr(env.unwrapped, "dt", 0.01) * float(NN_ACTIVE_STEP_SLEEP_FACTOR))
                     else:
                         if sub_step < transition_steps:
                             w = (sub_step + 1) / transition_steps
@@ -508,11 +633,21 @@ def run_nn_mode(
                         else:
                             blended = action
                         env.step(blended)
+                        last_applied_action = blended
+                        time.sleep(getattr(env.unwrapped, "dt", 0.01) * float(NN_ACTIVE_STEP_SLEEP_FACTOR))
                     sync_passive_viewer(passive_viewer)
                     step_count += 1
 
-                prev_action = action
+                if abort_to_selection or quit_requested:
+                    break
 
+                prev_action = last_applied_action
+
+            if quit_requested:
+                break
+            if abort_to_selection:
+                current_csv = None
+                continue
             if viewer_closed:
                 break
 

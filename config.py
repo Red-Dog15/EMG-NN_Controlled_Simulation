@@ -85,8 +85,30 @@ NN_DEFAULT_MODEL_PATH: str = os.getenv(
 	"NN_MODEL_PATH",
 	str(PROJECT_ROOT / "Scripts" / "NN" / "models" / "final_model_full.pth"),
 )
-NN_WINDOW_SIZE: int = int(os.getenv("NN_WINDOW_SIZE", "100"))
+# Increased default window size for NN inference replay.
+# Note: larger windows can smooth predictions but may reduce responsiveness.
+NN_WINDOW_SIZE: int = int(os.getenv("NN_WINDOW_SIZE", "150"))
 NN_INFERENCE_STRIDE: int = int(os.getenv("NN_INFERENCE_STRIDE", "25"))
+
+# NN transition tuning (used by simulation/run_nn.py)
+# Transition duration is measured in simulation steps and derived from
+# steps_per_window and severity-specific scaling factors.
+NN_TRANSITION_BASE_FRACTION: float = float(os.getenv("NN_TRANSITION_BASE_FRACTION", "0.80"))
+NN_TRANSITION_MIN_STEPS: int = int(os.getenv("NN_TRANSITION_MIN_STEPS", "2"))
+
+# Larger factor => slower transition, smaller factor => faster transition.
+NN_SEVERITY_TRANSITION_DURATION_FACTOR: Dict[str, float] = {
+	"Light": float(os.getenv("NN_SEVERITY_FACTOR_LIGHT", "4")),
+	"Medium": float(os.getenv("NN_SEVERITY_FACTOR_MEDIUM", "2")),
+	"Hard": float(os.getenv("NN_SEVERITY_FACTOR_HARD", "0.45")),
+}
+
+# No_Movement handling: multiplier on env.dt while holding current pose.
+NN_NO_MOVEMENT_HOLD_SLEEP_FACTOR: float = float(os.getenv("NN_NO_MOVEMENT_HOLD_SLEEP_FACTOR", "1.0"))
+
+# Active movement handling: multiplier on env.dt while replaying inferred actions.
+# Set >1.0 to slow visible playback, <1.0 to speed it up.
+NN_ACTIVE_STEP_SLEEP_FACTOR: float = float(os.getenv("NN_ACTIVE_STEP_SLEEP_FACTOR", "1.0"))
 
 # Path to the .venv Python that has PyTorch/pandas installed (Scripts env).
 # Override with the NN_VENV_PYTHON env-var if your layout differs.

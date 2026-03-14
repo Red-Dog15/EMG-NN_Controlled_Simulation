@@ -11,6 +11,11 @@ from pathlib import Path
 
 import numpy as np
 
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
 from myosuite.utils import gym
 
 from config import (
@@ -37,6 +42,26 @@ from viewer_utils import (
 
 
 JOINT_TUNING_DIR = Path(__file__).resolve().parent.parent / "Output" / "joint_tuning"
+
+
+def _poll_runtime_command():
+    """Read non-blocking single-key runtime commands on Windows terminals."""
+    if msvcrt is None:
+        return None
+    try:
+        while msvcrt.kbhit():
+            key = msvcrt.getwch().lower()
+            if key in {"\x00", "\xe0"}:
+                if msvcrt.kbhit():
+                    msvcrt.getwch()
+                continue
+            if key == "b":
+                return "back"
+            if key == "q":
+                return "quit"
+    except Exception:
+        return None
+    return None
 
 
 def show_main_menu():
@@ -319,7 +344,10 @@ def run_manual_controller(time_value):
                 action = np.clip(action, env.action_space.low, env.action_space.high)
 
             print(f"Selected movement: {movement} (env: {current_env_id})")
-            print(f"Running for {time_value} seconds... Close the window or press Ctrl+C to stop.")
+            print(
+                f"Running for {time_value} seconds... "
+                "Press 'b' to abort to movement menu, 'q' to quit, or Ctrl+C to stop."
+            )
 
             transition_seconds = max(0.4, min(2.0, float(time_value) * 0.5))
             seg_start_time = time.time()
@@ -337,7 +365,16 @@ def run_manual_controller(time_value):
                 prev_action = target_action.copy()
 
             end_time = time.time() + time_value
+            aborted_to_menu = False
             while time.time() < end_time:
+                runtime_cmd = _poll_runtime_command()
+                if runtime_cmd == "back":
+                    print("Current movement aborted. Returning to movement menu.")
+                    aborted_to_menu = True
+                    break
+                if runtime_cmd == "quit":
+                    print("Quit requested.")
+                    return
                 if passive_viewer is None:
                     env.unwrapped.mj_render()
                 if is_no_movement:
@@ -358,6 +395,9 @@ def run_manual_controller(time_value):
 
                 if step_count % 100 == 0:
                     print(f"Steps: {step_count}")
+
+            if aborted_to_menu:
+                continue
 
     except KeyboardInterrupt:
         print(f"\nStopped after {step_count} steps")
