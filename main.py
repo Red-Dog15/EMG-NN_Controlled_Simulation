@@ -20,6 +20,7 @@ if git_exe:
     os.environ.setdefault("GIT_PYTHON_GIT_EXECUTABLE", git_exe)
 
 from myosuite.utils import gym
+from viewer_utils import close_passive_viewer, open_passive_viewer, sync_passive_viewer
 
 ENV_ID = MAIN_RANDOM_ENV_ID
 PRINT_ACTUATORS = DUMP_ACTUATORS_ON_START
@@ -27,6 +28,13 @@ PRINT_ACTUATORS = DUMP_ACTUATORS_ON_START
 print("Initializing myosuite environment...")
 env = gym.make(ENV_ID)
 env.reset()
+
+# Open passive viewer (skin on, default camera). Close the window anytime to stop.
+passive_viewer = open_passive_viewer(env)
+if passive_viewer is None:
+    print("Note: passive viewer unavailable for this env backend; using mj_render fallback.")
+else:
+    print("Passive viewer opened. Close it or press Ctrl+C to stop.")
 
 def _get_actuator_names(env):
     try:
@@ -85,8 +93,9 @@ step_count = 0
 
 try:
     while True:  # Run indefinitely until window closed
-        env.unwrapped.mj_render()  # Use unwrapped to avoid deprecation warning
+        env.unwrapped.mj_render()
         env.step(env.action_space.sample())
+        sync_passive_viewer(passive_viewer)
         step_count += 1
         
         if step_count % 100 == 0:
@@ -95,5 +104,6 @@ try:
 except KeyboardInterrupt:
     print(f"\nStopped after {step_count} steps")
 finally:
+    close_passive_viewer(passive_viewer)
     env.close()
     print("Environment closed")

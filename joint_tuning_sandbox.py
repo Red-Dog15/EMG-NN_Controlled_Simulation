@@ -34,6 +34,19 @@ except Exception:
     )
     _CONFIG_ENV_ID = "myoHandReachFixed-v0"
 
+from viewer_utils import (
+    CAMERA_PRESETS,
+    _get_mj_model_data,
+    apply_camera_preset,
+    close_passive_viewer,
+    open_passive_viewer,
+    set_viewer_activation,
+    set_viewer_joints,
+    set_viewer_skin,
+    set_viewer_tendon,
+    sync_passive_viewer,
+)
+
 
 @dataclass
 class JointInfo:
@@ -42,46 +55,6 @@ class JointInfo:
     qpos_addr: int
     qpos_value: float
     qrange: Tuple[float, float]
-
-
-def _get_mj_model_data(env):
-    """Extract raw model/data from a MyoSuite/gym env wrapper.
-
-    Returns a tuple of (backend, model, data) where backend is:
-      - "mujoco" for native mujoco python bindings
-      - "mujoco_py" for mujoco_py wrappers
-      - None when no compatible pair is found
-    """
-    raw = env.unwrapped
-    sim = getattr(raw, "sim", None) or getattr(env, "sim", None)
-
-    candidates = [
-        (getattr(raw, "model", None), getattr(raw, "data", None)),
-    ]
-    if sim is not None:
-        candidates.append((getattr(sim, "model", None), getattr(sim, "data", None)))
-
-    # Prefer native mujoco model/data when available
-    try:
-        import mujoco as _mj
-        for m, d in candidates:
-            if isinstance(m, _mj.MjModel) and isinstance(d, _mj.MjData):
-                return "mujoco", m, d
-    except ImportError:
-        pass
-
-    # dm_control wrappers in MyoSuite expose wrapped model/data objects.
-    for m, d in candidates:
-        mod = type(m).__module__ if m is not None else ""
-        if m is not None and d is not None and mod.startswith("dm_control."):
-            return "dm_control", m, d
-
-    # Fallback: detect mujoco_py-like model/data by duck-typing
-    for m, d in candidates:
-        if m is not None and d is not None and hasattr(m, "njnt") and hasattr(d, "qpos"):
-            return "mujoco_py", m, d
-
-    return None, None, None
 
 
 def _configure_git_executable() -> None:
@@ -371,12 +344,19 @@ def ensure_output_dir() -> str:
     return out_dir
 
 
-def export_movement_ranges(movement: str, ranges: Dict[str, Tuple[float, float]]) -> str:
+def export_movement_ranges(
+    movement: str,
+    ranges: Dict[str, Tuple[float, float]],
+    exact_qpos: Dict[str, float] | None = None,
+) -> str:
     out_dir = ensure_output_dir()
     out_path = os.path.join(out_dir, f"{movement}.json")
     payload = {
         "movement": movement,
         "target_jnt_range": {k: [float(v[0]), float(v[1])] for k, v in ranges.items()},
+        "target_joint_qpos": {
+            k: float(exact_qpos[k]) for k in ranges.keys() if exact_qpos is not None and k in exact_qpos
+        },
         "suggested_variant_kwargs": {
             "target_jnt_range": {k: [float(v[0]), float(v[1])] for k, v in ranges.items()},
             "target_type": "generate",
@@ -404,7 +384,14 @@ def print_help() -> None:
     print("  baseline                      -> store current pose as baseline for auto-mark")
     print("  keyqpos <vals...>             -> apply full qpos list (copy from <key qpos='...'>)")
     print("  auto_mark [th] [pad]          -> mark joints moved vs baseline")
-    print("  viewer                        -> open interactive MuJoCo viewer (drag hand to pose)")
+    print("  viewer                        -> open interactive MuJoCo viewer (blocking, drag hand to pose)")
+    print("  viewer_open [camera] [skin]   -> keep passive viewer open while using commands")
+    print("  viewer_close                  -> close passive viewer")
+    print("  camera <preset>               -> change passive viewer camera  (" + ", ".join(CAMERA_PRESETS) + ")")
+    print("  skin <on|off>                 -> transparent mode: off = see-through geoms to reveal muscles")
+    print("  activation <on|off>           -> colour muscles by activation level")
+    print("  tendon <on|off>               -> show tendon paths")
+    print("  joints <on|off>               -> show joint axes")
     print("  mark <joint> <low> <high>     -> add target_jnt_range candidate")
     print("  unmark <joint>                -> remove candidate")
     print("  marked                        -> show marked ranges")
@@ -444,9 +431,15 @@ def main() -> None:
         print_joint_table(env)
 
     print_help()
+    passive_viewer = None
 
     try:
         while True:
+            # Keep passive viewer alive if it has been opened.
+            if passive_viewer is not None and not sync_passive_viewer(passive_viewer):
+                passive_viewer = None
+                print("Passive viewer closed.")
+
             prompt = f"\ntune[{current_movement}]> " if current_movement else "\ntune> "
             raw = input(prompt).strip()
             if not raw:
@@ -472,21 +465,25 @@ def main() -> None:
                     print("Usage: set <joint_name_or_idx> <value>")
                     continue
                 set_joint_value(env, parts[1], float(parts[2]))
+                sync_passive_viewer(passive_viewer)
                 continue
 
             if cmd == "render":
                 steps = int(parts[1]) if len(parts) > 1 else 200
                 render_steps(env, steps)
+                sync_passive_viewer(passive_viewer)
                 continue
 
             if cmd in {"simulate", "sim", "live"}:
                 seconds = float(parts[1]) if len(parts) > 1 else 20.0
                 live_simulation(env, seconds=seconds, sleep_s=0.0)
+                sync_passive_viewer(passive_viewer)
                 continue
 
             if cmd == "step":
                 steps = int(parts[1]) if len(parts) > 1 else 200
                 simulate_steps(env, steps)
+                sync_passive_viewer(passive_viewer)
                 continue
 
             if cmd == "ctrl":
@@ -595,7 +592,11 @@ def main() -> None:
                     print("No marked ranges. Use 'mark' or 'auto_mark' first.")
                     continue
 
-                out = export_movement_ranges(movement, marked_ranges)
+                out = export_movement_ranges(
+                    movement,
+                    marked_ranges,
+                    exact_qpos=_capture_joint_qpos_map(env),
+                )
                 print(f"Saved: {out}")
                 print("\nPaste into config.py -> MOVEMENT_VARIANT_KWARGS:")
                 print(f"\"{movement}\": {{")
@@ -611,11 +612,103 @@ def main() -> None:
             if cmd == "neutral":
                 set_neutral_pose(env)
                 baseline_qpos = _capture_joint_qpos_map(env)
+                sync_passive_viewer(passive_viewer)
                 print("Baseline updated to neutral pose.")
                 continue
 
             if cmd == "viewer":
                 launch_interactive_viewer(env)
+                sync_passive_viewer(passive_viewer)
+                continue
+
+            if cmd == "viewer_open":
+                camera = parts[1] if len(parts) > 1 else "default"
+                skin_token = parts[2].lower() if len(parts) > 2 else "on"
+                if skin_token not in {"on", "off"}:
+                    print("Usage: viewer_open [camera] [skin]  — skin must be on or off")
+                    continue
+                close_passive_viewer(passive_viewer)
+                passive_viewer = open_passive_viewer(env, skin=(skin_token == "on"), camera=camera)
+                if passive_viewer is None:
+                    print("Passive viewer requires native mujoco backend (not available for this env).")
+                else:
+                    print(f"Passive viewer opened  camera={camera}  skin={skin_token}")
+                continue
+
+            if cmd == "viewer_close":
+                close_passive_viewer(passive_viewer)
+                passive_viewer = None
+                print("Passive viewer closed.")
+                continue
+
+            if cmd == "camera":
+                if len(parts) != 2:
+                    print("Usage: camera <" + "|".join(CAMERA_PRESETS) + ">")
+                    continue
+                if passive_viewer is None:
+                    print("No viewer open. Use 'viewer_open' first.")
+                    continue
+                if apply_camera_preset(passive_viewer, parts[1]):
+                    print(f"Camera set to '{parts[1]}'.")
+                else:
+                    print(f"Unknown preset '{parts[1]}'. Available: {', '.join(CAMERA_PRESETS)}")
+                continue
+
+            if cmd == "skin":
+                if len(parts) != 2 or parts[1].lower() not in {"on", "off"}:
+                    print("Usage: skin <on|off>")
+                    continue
+                if passive_viewer is None:
+                    print("No viewer open. Use 'viewer_open' first.")
+                    continue
+                enabled = parts[1].lower() == "on"
+                if set_viewer_skin(passive_viewer, enabled):
+                    label = "solid (skin on)" if enabled else "transparent (skin off — see-through to muscles)"
+                    print(f"Skin: {label}")
+                else:
+                    print("Skin toggle failed for this viewer.")
+                continue
+
+            if cmd == "activation":
+                if len(parts) != 2 or parts[1].lower() not in {"on", "off"}:
+                    print("Usage: activation <on|off>")
+                    continue
+                if passive_viewer is None:
+                    print("No viewer open. Use 'viewer_open' first.")
+                    continue
+                enabled = parts[1].lower() == "on"
+                if set_viewer_activation(passive_viewer, enabled):
+                    print(f"Muscle activation colour {'enabled' if enabled else 'disabled'}.")
+                else:
+                    print("Activation toggle failed for this viewer.")
+                continue
+
+            if cmd == "tendon":
+                if len(parts) != 2 or parts[1].lower() not in {"on", "off"}:
+                    print("Usage: tendon <on|off>")
+                    continue
+                if passive_viewer is None:
+                    print("No viewer open. Use 'viewer_open' first.")
+                    continue
+                enabled = parts[1].lower() == "on"
+                if set_viewer_tendon(passive_viewer, enabled):
+                    print(f"Tendon paths {'enabled' if enabled else 'disabled'}.")
+                else:
+                    print("Tendon toggle failed for this viewer.")
+                continue
+
+            if cmd == "joints":
+                if len(parts) != 2 or parts[1].lower() not in {"on", "off"}:
+                    print("Usage: joints <on|off>")
+                    continue
+                if passive_viewer is None:
+                    print("No viewer open. Use 'viewer_open' first.")
+                    continue
+                enabled = parts[1].lower() == "on"
+                if set_viewer_joints(passive_viewer, enabled):
+                    print(f"Joint axes {'enabled' if enabled else 'disabled'}.")
+                else:
+                    print("Joints toggle failed for this viewer.")
                 continue
 
             if cmd == "reset":
@@ -632,6 +725,7 @@ def main() -> None:
     except EOFError:
         print("\nInput stream closed")
     finally:
+        close_passive_viewer(passive_viewer)
         env.close()
         print("Environment closed")
 

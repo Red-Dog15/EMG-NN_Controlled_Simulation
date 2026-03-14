@@ -27,6 +27,12 @@ if SCRIPTS_DATA_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DATA_DIR)
 
 from Data_Mapping import get_MyoSuite_Movement_LUT
+from viewer_utils import (
+    close_passive_viewer,
+    open_passive_viewer,
+    run_viewer_submenu,
+    sync_passive_viewer,
+)
 
 
 JOINT_TUNING_DIR = Path(__file__).resolve().parent.parent / "Output" / "joint_tuning"
@@ -52,18 +58,22 @@ def print_movement_guide():
             print(f"{key}) Exit")
         else:
             print(f"{key}) {movement}")
+    print("v) Viewer settings (skin / camera)")
 
 
 def get_movement_from_user():
     """
-    Prompts for movement selection 1-8 and returns movement name or None for exit.
+    Prompts for movement selection 1-8 or 'v' for viewer. Returns movement name,
+    None for exit, or '__viewer__' sentinel for viewer submenu.
     """
     while True:
         print_movement_guide()
-        choice = input("Select movement (1-8): ").strip()
+        choice = input("Select movement (1-8) or v: ").strip().lower()
         if choice in MOVEMENT_MENU_MAP:
             return MOVEMENT_MENU_MAP[choice]
-        print("Invalid selection. Please choose 1-8.")
+        if choice == "v":
+            return "__viewer__"
+        print("Invalid selection. Please choose 1-8 or v.")
 
 
 def _open_env(env_id):
@@ -85,12 +95,29 @@ def _get_joint_name(model, idx):
 
 
 def _load_exported_joint_targets(movement_name):
-    """Load midpoint target qpos per joint from exported tuning JSON."""
+    """Load target qpos per joint from exported tuning JSON.
+
+        Preference order:
+            1) exact joint snapshot from tuner (target_joint_qpos)
+            2) midpoint of target_jnt_range (legacy fallback)
+    """
     path = JOINT_TUNING_DIR / f"{movement_name}.json"
+    
     if not path.is_file():
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
+        exact = payload.get("target_joint_qpos")
+        if isinstance(exact, dict) and exact:
+            targets = {}
+            for joint_name, value in exact.items():
+                try:
+                    targets[joint_name] = float(value)
+                except Exception:
+                    continue
+            if targets:
+                return targets
+
         ranges = payload.get("target_jnt_range") or payload.get("suggested_variant_kwargs", {}).get("target_jnt_range")
         if not isinstance(ranges, dict):
             return None
@@ -131,6 +158,25 @@ def _apply_joint_targets_step(env, qpos_targets, blend=0.35):
     for qidx, target in qpos_targets.items():
         cur = float(sim.data.qpos[qidx])
         sim.data.qpos[qidx] = (1.0 - blend) * cur + blend * target
+    sim.forward()
+
+
+def _smoothstep01(x: float) -> float:
+    """Cubic smoothstep from 0..1 to 0..1 for gentle transition ramps."""
+    x = max(0.0, min(1.0, float(x)))
+    return x * x * (3.0 - 2.0 * x)
+
+
+def _apply_joint_targets_interp(env, start_qpos, target_qpos, phase: float):
+    """Interpolate joints from start pose to target pose using smooth phase."""
+    sim = env.unwrapped.sim
+    w = _smoothstep01(phase)
+    for qidx, target in target_qpos.items():
+        s = float(start_qpos.get(qidx, sim.data.qpos[qidx]))
+        sim.data.qpos[qidx] = (1.0 - w) * s + w * float(target)
+    # Zero velocity for the driven joints so interpolation is visually stable.
+    if hasattr(sim.data, "qvel"):
+        sim.data.qvel[:] = 0.0
     sim.forward()
 
 
@@ -203,13 +249,30 @@ def run_manual_controller(time_value):
     else:
         print(f"Total actuators in {current_env_id}: {len(actuator_names)}")
 
+    # Open passive viewer so user can adjust skin/camera while running.
+    passive_viewer = open_passive_viewer(env)
+    if passive_viewer is None:
+        print("Note: passive viewer unavailable for this env backend; use MyoSuite's built-in render.")
+    else:
+        print("Passive viewer opened.  Press 'v' in the movement menu to adjust skin/camera.")
+
     step_count = 0
+    # Keep action continuity across movement selections for smooth muscle transitions.
+    prev_action = np.zeros(env.action_space.shape[0], dtype=float)
     try:
         while True:
+            if passive_viewer is not None and not sync_passive_viewer(passive_viewer):
+                passive_viewer = None
+                print("Passive viewer was closed.")
+
             movement = get_movement_from_user()
             if movement is None:
                 print("Exiting controller.")
                 return
+
+            if movement == "__viewer__":
+                passive_viewer = run_viewer_submenu(env, passive_viewer)
+                continue
 
             # Prefer exported joint tuning when available for this movement.
             exported_joint_targets = None
@@ -248,15 +311,31 @@ def run_manual_controller(time_value):
             print(f"Selected movement: {movement} (env: {current_env_id})")
             print(f"Running for {time_value} seconds... Close the window or press Ctrl+C to stop.")
 
+            transition_seconds = max(0.4, min(2.0, float(time_value) * 0.5))
+            seg_start_time = time.time()
+
+            start_qpos_targets = None
+            if resolved_qpos_targets:
+                sim = env.unwrapped.sim
+                start_qpos_targets = {qidx: float(sim.data.qpos[qidx]) for qidx in resolved_qpos_targets.keys()}
+
+            target_action = action if action is not None else prev_action.copy()
+            start_action = prev_action.copy()
+
             end_time = time.time() + time_value
             while time.time() < end_time:
                 env.unwrapped.mj_render()
                 if resolved_qpos_targets:
-                    _apply_joint_targets_step(env, resolved_qpos_targets, blend=0.35)
-                    # Advance one frame for dynamics/contacts while preserving pose drive.
+                    phase = (time.time() - seg_start_time) / transition_seconds
+                    _apply_joint_targets_interp(env, start_qpos_targets, resolved_qpos_targets, phase=phase)
                     env.unwrapped.sim.advance(substeps=1, render=False)
                 else:
-                    env.step(action)
+                    phase = (time.time() - seg_start_time) / transition_seconds
+                    w = _smoothstep01(phase)
+                    blended_action = (1.0 - w) * start_action + w * target_action
+                    env.step(blended_action)
+                    prev_action = blended_action
+                sync_passive_viewer(passive_viewer)
                 step_count += 1
 
                 if step_count % 100 == 0:
@@ -265,6 +344,7 @@ def run_manual_controller(time_value):
     except KeyboardInterrupt:
         print(f"\nStopped after {step_count} steps")
     finally:
+        close_passive_viewer(passive_viewer)
         if env is not None:
             env.close()
         print("Environment closed")
